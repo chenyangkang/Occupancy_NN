@@ -20,6 +20,51 @@ from sklearn.metrics import roc_auc_score, f1_score, recall_score, precision_sco
 from functools import partial
 from sklearn.isotonic import IsotonicRegression
 
+class occ_loss(nn.Module):
+    """ N-mixture loss.
+    
+    Args:
+      y_obs (tensor): nsite by nrep count observation matrix
+      psi_hat (tensor): occupancy expected value
+      p_hat (tensor): individual detection probability
+    
+    Returns:
+      negative log-likelihood (tensor)
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, output, y_obs):
+        psi_hat, p_hat = output
+        batch_size, n_rep = y_obs.shape
+        z_vals = torch.tensor([0.0, 1.0]).view(1, 2) # possible_z_vals
+        z_logprob = torch.distributions.Bernoulli(probs=psi_hat).log_prob(z_vals) # (batch_size, 2)
+        
+        all_zero = (y_obs.sum(dim=1) == 0)       # shape = (batch_size,), bool
+        inf = float('inf')
+        loglik_y_given_z0 = torch.where(all_zero, 
+                                        torch.zeros(batch_size),  # log(1)=0
+                                        -inf * torch.ones(batch_size))
+
+        log_p    = torch.log(p_hat.clamp(min=1e-8))       # → (batch_size,)
+        log_1mp  = torch.log((1-p_hat).clamp(min=1e-8))   # → (batch_size,)
+        log_p_expand   = log_p.view(batch_size, 1)       # → (batch_size, 1)
+        log_1mp_expand = log_1mp.view(batch_size, 1)     # → (batch_size, 1)
+        term_rep = y_obs * log_p_expand + (1 - y_obs) * log_1mp_expand
+        loglik_y_given_z1 = term_rep.sum(dim=1)  
+        
+        y_logprob = torch.stack(
+            [loglik_y_given_z0,    # (batch_size,)
+            loglik_y_given_z1],   # (batch_size,)
+            dim=1                   # → (batch_size, 2)
+        )
+
+        joint_logprob = z_logprob + y_logprob   # shape = (batch_size, 2)
+        log_lik_per_site = torch.logsumexp(joint_logprob, dim=1)  # → (batch_size,)
+
+        return -log_lik_per_site.sum()
+
+
 
 class FocalLoss(nn.Module):
 

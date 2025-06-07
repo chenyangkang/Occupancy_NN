@@ -4,7 +4,7 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 from torch import nn  
 import torch.optim as optim
-from loss import WeightedBCELoss
+from .loss import WeightedBCELoss
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt  
 
@@ -41,7 +41,7 @@ class ProbabilityCalibrator:
         pass
     
     def prob_clip(self, prob):
-        return torch.clip(prob, 1e-6, 1 - 1e-6) if isinstance(prob, torch.Tensor) else np.clip(prob, 1e-6, 1 - 1e-6)
+        return torch.clip(prob, 1e-16, 1 - 1e-16) if isinstance(prob, torch.Tensor) else np.clip(prob, 1e-16, 1 - 1e-16)
 
     def fit(self, network, X_train, y_train, detect_vars, occupancy_vars, num_epochs=100000, lr=0.01, patience=20, min_delta=0.0, validation_split=0.2):
         self.s_prior = np.array([sum(y_train == 0) / len(y_train), sum(y_train == 1) / len(y_train)])

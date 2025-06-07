@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from skorch import NeuralNetClassifier
+from skorch import NeuralNetClassifier, NeuralNetRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score 
 from skorch.callbacks import EpochScoring
@@ -21,20 +21,22 @@ from functools import partial
 from sklearn.isotonic import IsotonicRegression
 from sklearn.base import BaseEstimator
 
-from loss import FocalLoss, WeightedBCELoss, UnweightedBCELoss, DeferredWeightedBCELoss
-from calibration import ProbabilityCalibrator
-from net import CombinedModel
+from .loss import FocalLoss, WeightedBCELoss, UnweightedBCELoss, DeferredWeightedBCELoss, occ_loss
+from .calibration import ProbabilityCalibrator
+from .net import CombinedModel
 
 import copy
 
 config = {
-    'loss': WeightedBCELoss,#DeferredWeightedBCELoss, #WeightedBCELoss,#nn.BCELoss,#FocalLoss,
+    'loss': occ_loss #nn.BCELoss #WeightedBCELoss,#DeferredWeightedBCELoss, #WeightedBCELoss,#nn.BCELoss,#FocalLoss,
 }
 
 
 def my_scoring(model_, X, y, metric='roc_auc'):
     
     pred_proba = model_.predict_proba(X)
+    if len(pred_proba.shape) == 3:
+        pred_proba = np.squeeze(pred_proba, axis=-1)
     if len(pred_proba.shape)==2:
         if pred_proba.shape[1]==2:
             pred_proba = pred_proba[:,1].flatten()
@@ -42,13 +44,13 @@ def my_scoring(model_, X, y, metric='roc_auc'):
         pred_proba = pred_proba.flatten()
     
     if metric=='roc_auc':
-        return roc_auc_score(y, pred_proba)
-    elif metric=='f1':
-        return f1_score(y, np.where(pred_proba>0.5, 1, 0))
-    elif metric=='recall':
-        return recall_score(y, np.where(pred_proba>0.5, 1, 0))
-    elif metric=='precision':
-        return precision_score(y, np.where(pred_proba>0.5, 1, 0))
+        return np.mean([roc_auc_score(y[:,i], pred_proba) for i in range(y.shape[1])])
+    # elif metric=='f1':
+    #     return f1_score(y, np.where(pred_proba>0.5, 1, 0))
+    # elif metric=='recall':
+    #     return recall_score(y, np.where(pred_proba>0.5, 1, 0))
+    # elif metric=='precision':
+    #     return precision_score(y, np.where(pred_proba>0.5, 1, 0))
     else:
         raise
     
@@ -122,17 +124,18 @@ class occupancy_ml_trainer(BaseEstimator):
             
         self.lr_scheduler = LRScheduler(
             policy=OneCycleLR,
-            max_lr=0.01,  # max learning rate for the cycle
+            max_lr=0.001,  # max learning rate for the cycle
             # steps_per_epoch=len(X_train_detection_var_df) // self.batch_size,  # batch size is 64
             # epochs=self.max_epochs
         )
             
-        callbacks = [EpochScoring(scoring=partial(my_scoring, metric='f1'),lower_is_better=False,name=f'train_f1', on_train=True),
+        callbacks = [
+                    #  EpochScoring(scoring=partial(my_scoring, metric='f1'),lower_is_better=False,name=f'train_f1', on_train=True),
                        EpochScoring(scoring=partial(my_scoring, metric='roc_auc'),lower_is_better=False,name=f'train_roc_auc', on_train=True),
-                       EpochScoring(scoring=partial(my_scoring, metric='f1'),lower_is_better=False,name=f'valid_f1', on_train=False),
+                    #    EpochScoring(scoring=partial(my_scoring, metric='f1'),lower_is_better=False,name=f'valid_f1', on_train=False),
                        EpochScoring(scoring=partial(my_scoring, metric='roc_auc'),lower_is_better=False,name=f'valid_roc_auc', on_train=False),
-                       EpochScoring(scoring=partial(my_scoring, metric='recall'),lower_is_better=False,name=f'valid_recall', on_train=False),
-                       EpochScoring(scoring=partial(my_scoring, metric='precision'),lower_is_better=False,name=f'valid_precision', on_train=False),
+                    #    EpochScoring(scoring=partial(my_scoring, metric='recall'),lower_is_better=False,name=f'valid_recall', on_train=False),
+                    #    EpochScoring(scoring=partial(my_scoring, metric='precision'),lower_is_better=False,name=f'valid_precision', on_train=False),
                        ]
         if self.do_early_stopping:
             self.early_stopping = EarlyStopping(
@@ -146,7 +149,7 @@ class occupancy_ml_trainer(BaseEstimator):
 
         # Wrap the model in skorch's NeuralNetClassifier
         if self.model is None:
-            self.model = NeuralNetClassifier(
+            self.model = NeuralNetRegressor(
                 CombinedModel,
                 module__input_dim_det=X_train_detection_var_df.shape[1],
                 module__input_dim_occ=X_train_occupancy_var_df.shape[1],
@@ -154,13 +157,13 @@ class occupancy_ml_trainer(BaseEstimator):
                 module__latent_size_occ=self.latent_size_occ,
                 module__latent_layer_det=self.latent_layer_det,
                 module__latent_layer_occ=self.latent_layer_occ,
-                criterion= config['loss'](),#FocalLoss, #WeightedBCELoss, #nn.BCELoss(), #WeightedBCELoss,#nn.BCELoss,#WeightedBCELoss,#nn.BCELoss ,#WeightedBCELoss,
+                criterion= config['loss'](),
                 optimizer=optim.Adam,
                 max_epochs=self.max_epochs,
-                lr=0.01,
+                lr=0.001,
                 batch_size=self.batch_size,
                 iterator_train__shuffle=True,
-                train_split=ValidSplit(cv=5, stratified=True) if self.validation else None,
+                train_split=ValidSplit(cv=5, stratified=False) if self.validation else None,
                 callbacks=callbacks,
                 verbose=self.verbose,
                 # warmstart=True
@@ -173,14 +176,14 @@ class occupancy_ml_trainer(BaseEstimator):
             self.model.partial_fit(
                 {"X_det": torch.tensor(np.array(X_train_detection_var_df), dtype=torch.float32), 
                 "X_occ": torch.tensor(np.array(X_train_occupancy_var_df), dtype=torch.float32)},
-                torch.tensor(np.array(np.where(y_train>0, 1, 0)).reshape(-1,1), dtype=torch.float32)
+                torch.tensor(np.array(np.where(y_train>0, 1, 0)), dtype=torch.float32)
             )
         else:
             self.model = copy.deepcopy(self.model)
             self.model.fit(
                 {"X_det": torch.tensor(np.array(X_train_detection_var_df), dtype=torch.float32), 
                 "X_occ": torch.tensor(np.array(X_train_occupancy_var_df), dtype=torch.float32)},
-                torch.tensor(np.array(np.where(y_train>0, 1, 0)).reshape(-1,1), dtype=torch.float32)
+                torch.tensor(np.array(np.where(y_train>0, 1, 0)), dtype=torch.float32)
             )
         
         # Fine-tune temperatures using the split-off validation set
